@@ -136,6 +136,7 @@ data/{asset_type}/{time_period}/{data_type}/{symbol}/{interval}/
 ```
 
 Examples:
+
 - `data/futures/um/daily/klines/BTCUSDT/1h/` - BTCUSDT futures 1h klines
 - `data/spot/daily/klines/ETHUSDT/5m/` - ETHUSDT spot 5m klines
 - `data/futures/um/monthly/klines/BTCUSDT/1m/` - BTCUSDT futures monthly 1m klines
@@ -204,11 +205,13 @@ download() -> Tuple[List[dict], List[dict]]
 Execute the download and processing pipeline.
 
 **Returns:**
-- `Tuple[List[dict], List[dict]]`: 
+
+- `Tuple[List[dict], List[dict]]`:
   - First element: List of download results (success/failure)
   - Second element: List of processing results (successful, failed)
 
 **Example:**
+
 ```python
 download_results, process_results = downloader.download()
 
@@ -313,6 +316,7 @@ df_1h = loader.load(
 ```
 
 Supported resampling intervals:
+
 - Seconds: `1s`, `5s`, `15s`, `30s`
 - Minutes: `1m`, `3m`, `5m`, `15m`, `30m`
 - Hours: `1h`, `2h`, `4h`, `6h`, `12h`
@@ -364,22 +368,23 @@ df_futures = futures_loader.load("BTCUSDT", "1h")
 
 When downloading kline data, the output will contain the following columns:
 
-| Column | Type | Description |
-|---------|-------|-------------|
-| open_time | Datetime | Open time (UTC) |
-| open | Float | Open price |
-| high | Float | High price |
-| low | Float | Low price |
-| close | Float | Close price |
-| volume | Float | Volume in base asset |
-| close_time | Datetime | Close time (UTC) |
-| quote_volume | Float | Volume in quote asset |
-| count | Int | Number of trades |
-| taker_buy_volume | Float | Taker buy base asset volume |
-| taker_buy_quote_volume | Float | Taker buy quote asset volume |
-| ignore | Int | Ignore |
+| Column                 | Type     | Description                  |
+| ---------------------- | -------- | ---------------------------- |
+| open_time              | Datetime | Open time (UTC)              |
+| open                   | Float    | Open price                   |
+| high                   | Float    | High price                   |
+| low                    | Float    | Low price                    |
+| close                  | Float    | Close price                  |
+| volume                 | Float    | Volume in base asset         |
+| close_time             | Datetime | Close time (UTC)             |
+| quote_volume           | Float    | Volume in quote asset        |
+| count                  | Int      | Number of trades             |
+| taker_buy_volume       | Float    | Taker buy base asset volume  |
+| taker_buy_quote_volume | Float    | Taker buy quote asset volume |
+| ignore                 | Int      | Ignore                       |
 
 The library automatically:
+
 - Validates data structure using Pandera schemas
 - Detects and converts timestamp units (milliseconds/nanoseconds)
 - Ensures proper type casting
@@ -399,6 +404,7 @@ The library includes several example scripts in the `examples/` folder to help y
 ### Download Examples
 
 - **`examples/download_futures_data.py`** - Download futures (USDT-Margined) kline data
+
   - Download last year of BTCUSDT 1h data
   - Download 2024 ETHUSDT 5m data
   - Demonstrates date range filtering and keep_zip options
@@ -455,6 +461,7 @@ MIT License
 ## Acknowledgments
 
 This library is inspired by and borrows ideas from:
+
 - [binance-bulk-downloader](https://github.com/binance/binance-public-data)
 - Binance Vision S3 bucket structure
 
@@ -462,3 +469,9 @@ This library is inspired by and borrows ideas from:
 
 For issues and questions, please open an issue on GitHub.
 
+## Publish
+
+```bash
+.venv/bin/python -m build
+twine upload dist/*
+```

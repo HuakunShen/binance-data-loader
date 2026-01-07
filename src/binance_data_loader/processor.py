@@ -3,7 +3,7 @@
 import zipfile
 from pathlib import Path
 from typing import Dict, List, Tuple
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import polars as pl
 from tqdm import tqdm
@@ -292,7 +292,7 @@ class DataProcessor:
         successful = []
         failed = []
 
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
             # Submit all jobs
             future_to_file = {
                 executor.submit(

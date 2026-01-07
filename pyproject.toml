@@ -1,6 +1,6 @@
 [project]
 name = "binance-data-loader"
-version = "0.1.1"
+version = "0.1.2"
 description = "A Python library for downloading and processing Binance Vision historical data"
 readme = "README.md"
 requires-python = ">=3.12"
