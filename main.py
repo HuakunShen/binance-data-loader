@@ -7,7 +7,7 @@ and resample the processed data.
 """
 
 from datetime import datetime, timedelta, UTC
-from binance_data import (
+from binance_data_loader import (
     BinanceDataDownloader,
     BinanceDataLoader,
     load_kline_data,

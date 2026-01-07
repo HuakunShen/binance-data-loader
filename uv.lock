@@ -12,7 +12,7 @@ wheels = [
 ]
 
 [[package]]
-name = "binance-data"
+name = "binance-data-loader"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

@@ -6,7 +6,7 @@ get date ranges, and resample to different timeframes.
 """
 
 from datetime import datetime, timedelta, UTC
-from binance_data import BinanceDataLoader, load_kline_data
+from binance_data_loader import BinanceDataLoader, load_kline_data
 from pathlib import Path
 
 

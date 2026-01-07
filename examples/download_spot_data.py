@@ -6,7 +6,7 @@ different symbols, intervals, and date ranges.
 """
 
 from datetime import datetime, timedelta, UTC
-from binance_data import BinanceDataDownloader, BinanceDataLoader
+from binance_data_loader import BinanceDataDownloader, BinanceDataLoader
 from pathlib import Path
 
 

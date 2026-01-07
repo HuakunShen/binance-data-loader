@@ -8,8 +8,8 @@ from concurrent.futures import ProcessPoolExecutor, as_completed
 import polars as pl
 from tqdm import tqdm
 
-from binance_data.schema import BinanceKlineDataSchema, BINANCE_KLINE_COLUMNS
-from binance_data.utils import (
+from binance_data_loader.schema import BinanceKlineDataSchema, BINANCE_KLINE_COLUMNS
+from binance_data_loader.utils import (
     detect_timestamp_unit,
     get_relative_path,
     remove_prefix_from_path,

@@ -10,8 +10,8 @@ from typing import List, Literal, Tuple, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 
-from binance_data.metadata import BinanceDataMetadata
-from binance_data.processor import DataProcessor
+from binance_data_loader.metadata import BinanceDataMetadata
+from binance_data_loader.processor import DataProcessor
 
 
 class BinanceDataDownloader:

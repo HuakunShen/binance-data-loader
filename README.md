@@ -29,7 +29,7 @@ uv pip install -e .
 ## Quick Start
 
 ```python
-from binance_data import BinanceDataDownloader
+from binance_data_loader import BinanceDataDownloader
 
 # Download BTCUSDT 1h futures data as Parquet
 downloader = BinanceDataDownloader(
@@ -46,7 +46,7 @@ downloader.download()
 ### Download Futures Data
 
 ```python
-from binance_data import BinanceDataDownloader
+from binance_data_loader import BinanceDataDownloader
 
 # Download USDT-Margined futures data
 downloader = BinanceDataDownloader(
@@ -83,7 +83,7 @@ downloader.download()
 If you already have ZIP files downloaded and only want to convert them to Parquet/CSV:
 
 ```python
-from binance_data import BinanceDataDownloader
+from binance_data_loader import BinanceDataDownloader
 from datetime import datetime, UTC
 
 # Process existing ZIP files, skip downloading
@@ -101,7 +101,7 @@ downloader.download()
 Download only files within a specific date range:
 
 ```python
-from binance_data import BinanceDataDownloader
+from binance_data_loader import BinanceDataDownloader
 from datetime import datetime, UTC, timedelta
 
 # Download data for the last 6 months
@@ -225,7 +225,7 @@ print(f"Processed {len(successful)} files successfully, {len(failed)} failed")
 Process downloaded ZIP files into Parquet or CSV format.
 
 ```python
-from binance_data.processor import DataProcessor
+from binance_data_loader.processor import DataProcessor
 
 processor = DataProcessor(output_format="parquet")
 result = processor.process_zip_file(
@@ -248,7 +248,7 @@ successful, failed = processor.process_zip_files(
 Fetch metadata about available Binance data files.
 
 ```python
-from binance_data.metadata import BinanceDataMetadata
+from binance_data_loader.metadata import BinanceDataMetadata
 
 metadata = BinanceDataMetadata()
 df = metadata.fetch_file_list(
@@ -267,7 +267,7 @@ print(df.head())
 After downloading and processing data, you can easily load it for analysis:
 
 ```python
-from binance_data import BinanceDataLoader
+from binance_data_loader import BinanceDataLoader
 from datetime import datetime, timedelta, UTC
 
 loader = BinanceDataLoader(data_dir="./data", data_type="spot")
@@ -324,7 +324,7 @@ Supported resampling intervals:
 Quick loading without class instantiation:
 
 ```python
-from binance_data import load_kline_data, get_date_range
+from binance_data_loader import load_kline_data, get_date_range
 
 # Get date range
 start, end = get_date_range(
