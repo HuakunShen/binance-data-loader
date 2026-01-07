@@ -125,4 +125,3 @@ if __name__ == "__main__":
 
     # Example 2: Download 2024 ETH 5m data
     # download_eth_5m_data_2024()
-

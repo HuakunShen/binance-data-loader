@@ -10,6 +10,16 @@ from binance_data_loader.loader import (
     load_kline_data,
     get_date_range,
 )
+from binance_data_loader.types import (
+    DownloadResult,
+    DownloadResultSuccess,
+    DownloadResultSkipped,
+    DownloadResultError,
+    ProcessResult,
+    ProcessResultSuccess,
+    ProcessResultSkipped,
+    ProcessResultError,
+)
 
 __all__ = [
     "BinanceDataDownloader",
@@ -18,4 +28,12 @@ __all__ = [
     "BinanceDataLoader",
     "load_kline_data",
     "get_date_range",
+    "DownloadResult",
+    "DownloadResultSuccess",
+    "DownloadResultSkipped",
+    "DownloadResultError",
+    "ProcessResult",
+    "ProcessResultSuccess",
+    "ProcessResultSkipped",
+    "ProcessResultError",
 ]

@@ -101,9 +101,7 @@ class BinanceDataLoader:
             # For CSV, use glob pattern to read only CSV files
             csv_files = sorted(data_path.glob("*.csv"))
             if not csv_files:
-                raise FileNotFoundError(
-                    f"No CSV files found at {data_path}"
-                )
+                raise FileNotFoundError(f"No CSV files found at {data_path}")
 
             # Read all CSV files and concatenate
             dfs = []
@@ -169,7 +167,10 @@ class BinanceDataLoader:
             df_lazy = pl.scan_parquet(pattern)
             # Apply time filter to lazy parquet and collect to DataFrame
             df = (
-                df_lazy.filter((pl.col("open_time") >= start_time_naive) & (pl.col("open_time") <= end_time_naive))
+                df_lazy.filter(
+                    (pl.col("open_time") >= start_time_naive)
+                    & (pl.col("open_time") <= end_time_naive)
+                )
                 .sort("open_time")
                 .unique(subset=["open_time"], keep="first")
                 .collect()
@@ -184,10 +185,14 @@ class BinanceDataLoader:
             df = pl.concat(dfs)
 
             # Apply time filter directly to DataFrame (no lazy operations needed)
-            df = df.filter(
-                (pl.col("open_time") >= start_time_naive)
-                & (pl.col("open_time") <= end_time_naive)
-            ).sort("open_time").unique(subset=["open_time"], keep="first")
+            df = (
+                df.filter(
+                    (pl.col("open_time") >= start_time_naive)
+                    & (pl.col("open_time") <= end_time_naive)
+                )
+                .sort("open_time")
+                .unique(subset=["open_time"], keep="first")
+            )
 
         # Resample if requested and interval != resample_to
         if resample_to and interval != resample_to:
@@ -285,4 +290,3 @@ def get_date_range(
     """
     loader = BinanceDataLoader(data_dir, data_type, output_format)
     return loader.get_date_range(symbol, interval)
-

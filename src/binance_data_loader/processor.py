@@ -14,6 +14,12 @@ from binance_data_loader.utils import (
     get_relative_path,
     remove_prefix_from_path,
 )
+from binance_data_loader.types import (
+    ProcessResult,
+    ProcessResultSuccess,
+    ProcessResultSkipped,
+    ProcessResultError,
+)
 
 
 class DataProcessor:
@@ -35,7 +41,7 @@ class DataProcessor:
 
     def process_zip_file(
         self, zip_path: Path, output_dir: Path, base_data_dir: Path
-    ) -> Dict:
+    ) -> ProcessResult:
         """
         Process a single ZIP file, validate CSV data, and save as Parquet or CSV.
 
@@ -52,11 +58,12 @@ class DataProcessor:
                 # Get the CSV file name (should be only one file)
                 csv_files = [f for f in zip_ref.namelist() if f.endswith(".csv")]
                 if not csv_files:
-                    return {
+                    error_result: ProcessResultError = {
                         "status": "error",
                         "file_path": zip_path,
                         "error": "No CSV file found in ZIP",
                     }
+                    return error_result
 
                 csv_file = csv_files[0]
 
@@ -65,8 +72,8 @@ class DataProcessor:
                     csv_content = f.read()
 
             # Detect if CSV has a header (futures data has headers, spot doesn't)
-            first_line = csv_content.split(b'\n', 1)[0].decode('utf-8', errors='ignore')
-            has_header = first_line.startswith('open_time')
+            first_line = csv_content.split(b"\n", 1)[0].decode("utf-8", errors="ignore")
+            has_header = first_line.startswith("open_time")
 
             # Read CSV with Polars
             try:
@@ -88,18 +95,20 @@ class DataProcessor:
                         ignore_errors=False,
                     )
             except Exception as e:
-                return {
+                parse_error: ProcessResultError = {
                     "status": "error",
                     "file_path": zip_path,
                     "error": f"Failed to parse CSV: {str(e)}",
                 }
+                return parse_error
 
             if df.is_empty():
-                return {
+                empty_error: ProcessResultError = {
                     "status": "error",
                     "file_path": zip_path,
                     "error": "Empty DataFrame",
                 }
+                return empty_error
 
             # Detect timestamp unit from first row
             first_timestamp = df["open_time"][0]
@@ -128,11 +137,12 @@ class DataProcessor:
                     ]
                 )
             except Exception as e:
-                return {
+                timestamp_error: ProcessResultError = {
                     "status": "error",
                     "file_path": zip_path,
                     "error": f"Failed to convert timestamps: {str(e)}",
                 }
+                return timestamp_error
 
             # Cast numeric columns to proper types
             try:
@@ -151,22 +161,24 @@ class DataProcessor:
                     ]
                 )
             except Exception as e:
-                return {
+                cast_error: ProcessResultError = {
                     "status": "error",
                     "file_path": zip_path,
                     "error": f"Failed to cast numeric columns: {str(e)}",
                 }
+                return cast_error
 
             # Validate against Pandera schema
             try:
                 validated_df = BinanceKlineDataSchema.validate(df)
                 df = validated_df
             except Exception as e:
-                return {
+                validation_error: ProcessResultError = {
                     "status": "error",
                     "file_path": zip_path,
                     "error": f"Validation failed: {str(e)}",
                 }
+                return validation_error
 
             # Determine output path
             output_path = Path(output_dir)
@@ -190,11 +202,12 @@ class DataProcessor:
                         / f"{filename}.{self.output_format}"
                     )
                 else:
-                    return {
+                    path_error: ProcessResultError = {
                         "status": "error",
                         "file_path": zip_path,
                         "error": "Could not determine output path from filename",
                     }
+                    return path_error
 
             # Remove 'data/' prefix if present
             if rel_path.parts[0] == "data":
@@ -208,12 +221,13 @@ class DataProcessor:
 
             # Skip if output file already exists
             if final_path.exists():
-                return {
+                skip_result: ProcessResultSkipped = {
                     "status": "skipped",
                     "file_path": zip_path,
                     "output_path": str(final_path),
                     "reason": "Output file already exists",
                 }
+                return skip_result
 
             # Create output directory
             final_path.parent.mkdir(parents=True, exist_ok=True)
@@ -225,32 +239,36 @@ class DataProcessor:
                 else:  # csv
                     df.write_csv(final_path)
             except Exception as e:
-                return {
+                save_error: ProcessResultError = {
                     "status": "error",
                     "file_path": zip_path,
                     "error": f"Failed to save {self.output_format}: {str(e)}",
                 }
+                return save_error
 
-            return {
+            success_result: ProcessResultSuccess = {
                 "status": "success",
                 "file_path": zip_path,
                 "output_path": str(final_path),
                 "rows": len(df),
                 "timestamp_unit": timestamp_unit,
             }
+            return success_result
 
         except zipfile.BadZipFile as e:
-            return {
+            bad_zip_error: ProcessResultError = {
                 "status": "error",
                 "file_path": zip_path,
                 "error": f"Bad ZIP file: {str(e)}",
             }
+            return bad_zip_error
         except Exception as e:
-            return {
+            unexpected_error: ProcessResultError = {
                 "status": "error",
                 "file_path": zip_path,
                 "error": f"Unexpected error: {str(e)}",
             }
+            return unexpected_error
 
     def process_zip_files(
         self,
@@ -258,7 +276,7 @@ class DataProcessor:
         output_dir: Path,
         base_data_dir: Path,
         max_workers: int = 4,
-    ) -> Tuple[List[Dict], List[Dict]]:
+    ) -> Tuple[List[ProcessResult], List[ProcessResult]]:
         """
         Process multiple ZIP files in parallel.
 

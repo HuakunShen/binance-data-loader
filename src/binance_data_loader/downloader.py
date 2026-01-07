@@ -12,6 +12,13 @@ from tqdm import tqdm
 
 from binance_data_loader.metadata import BinanceDataMetadata
 from binance_data_loader.processor import DataProcessor
+from binance_data_loader.types import (
+    DownloadResult,
+    ProcessResult,
+    DownloadResultSuccess,
+    DownloadResultSkipped,
+    DownloadResultError,
+)
 
 
 class BinanceDataDownloader:
@@ -77,7 +84,9 @@ class BinanceDataDownloader:
         self.metadata_fetcher = BinanceDataMetadata()
         self.data_processor = DataProcessor(output_format=self.output_format)
 
-    def download(self) -> Tuple[List[dict], Tuple[List[dict], List[dict]]]:
+    def download(
+        self,
+    ) -> Tuple[List[DownloadResult], Tuple[List[ProcessResult], List[ProcessResult]]]:
         """
         Download and process Binance data.
 
@@ -95,9 +104,7 @@ class BinanceDataDownloader:
         print("\n=== Step 1: Fetching file list ===")
         date_range = ""
         if self.start_date or self.end_date:
-            date_range = f" ({self.start_date.strftime('%Y-%m-%d') if isinstance(self.start_date, datetime) else self.start_date} to {self.end_date.strftime('%Y-%m-%d') if isinstance(self.end_date, datetime) else self.end_date or 'yesterday'})"
-        else:
-            date_range = ""
+            date_range = f" ({self.start_date.strftime('%Y-%m-%d') if self.start_date else self.start_date} to {self.end_date.strftime('%Y-%m-%d') if self.end_date else self.end_date or 'yesterday'})"
         print(f"Time range{date_range}")
         file_list_df = self.metadata_fetcher.fetch_file_list(
             self.prefix, end_date=self.end_date
@@ -178,7 +185,7 @@ class BinanceDataDownloader:
 
         return download_results, process_results
 
-    def _download_files(self, file_list_df) -> List[dict]:
+    def _download_files(self, file_list_df: pl.DataFrame) -> List[DownloadResult]:
         """
         Download files concurrently.
 
@@ -272,7 +279,7 @@ class BinanceDataDownloader:
 
         return results
 
-    def _download_single_file(self, task: Tuple[str, Path, int]) -> dict:
+    def _download_single_file(self, task: Tuple[str, Path, int]) -> DownloadResult:
         """
         Download a single file.
 
@@ -286,12 +293,13 @@ class BinanceDataDownloader:
 
         # Skip if file already exists
         if output_path.exists():
-            return {
+            result: DownloadResultSkipped = {
                 "status": "skipped",
                 "key": key,
                 "zip_path": str(output_path),
                 "reason": "File already exists",
             }
+            return result
 
         # Create directory if it doesn't exist
         output_dir = output_path.parent
@@ -311,29 +319,32 @@ class BinanceDataDownloader:
                 with open(output_path, "wb") as f:
                     f.write(response.content)
 
-                return {
+                success_result: DownloadResultSuccess = {
                     "status": "success",
                     "key": key,
                     "zip_path": output_path,
                     "size": size,
                 }
+                return success_result
 
             except Exception as e:
                 if attempt < max_retries - 1:
                     time.sleep(retry_delay)
                     retry_delay *= 2  # Exponential backoff
                 else:
-                    return {
+                    error_result: DownloadResultError = {
                         "status": "error",
                         "key": key,
                         "error": str(e),
                     }
+                    return error_result
 
-        return {
+        max_retry_error: DownloadResultError = {
             "status": "error",
             "key": key,
             "error": "Max retries exceeded",
         }
+        return max_retry_error
 
     def _cleanup_zip_files(self, zip_files: List[Path]) -> int:
         """
