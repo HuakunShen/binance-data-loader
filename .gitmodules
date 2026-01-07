@@ -1,0 +1,3 @@
+[submodule "reference/binance-bulk-downloader"]
+	path = reference/binance-bulk-downloader
+	url = https://github.com/aoki-h-jp/binance-bulk-downloader.git
