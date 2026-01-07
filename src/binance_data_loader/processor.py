@@ -2,7 +2,7 @@
 
 import zipfile
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import polars as pl
@@ -54,6 +54,56 @@ class DataProcessor:
             Dictionary with processing results
         """
         try:
+            # Determine output path FIRST (before any expensive processing)
+            output_path = Path(output_dir)
+
+            zip_path_obj = Path(zip_path)
+            rel_path = get_relative_path(zip_path, base_data_dir)
+
+            if rel_path is None:
+                # Fallback: extract symbol and interval from filename
+                filename = zip_path_obj.stem  # e.g., BTCUSDT-1h-2024-12-31
+                parts = filename.split("-")
+                if len(parts) >= 2:
+                    symbol = parts[0]
+                    interval = parts[1]
+                    rel_path = (
+                        Path("spot")
+                        / "daily"
+                        / "klines"
+                        / symbol
+                        / interval
+                        / f"{filename}.{self.output_format}"
+                    )
+                else:
+                    path_error: ProcessResultError = {
+                        "status": "error",
+                        "file_path": zip_path,
+                        "error": "Could not determine output path from filename",
+                    }
+                    return path_error
+
+            # Remove 'data/' prefix if present
+            if rel_path.parts[0] == "data":
+                rel_path = remove_prefix_from_path(rel_path, "data")
+
+            # Change extension to .parquet or .csv
+            output_rel_path = rel_path.with_suffix(f".{self.output_format}")
+
+            # Create the full output path
+            final_path = output_path / output_rel_path
+
+            # Skip if output file already exists (CHECK THIS FIRST, before any expensive processing)
+            if final_path.exists():
+                skip_result: ProcessResultSkipped = {
+                    "status": "skipped",
+                    "file_path": zip_path,
+                    "output_path": str(final_path),
+                    "reason": "Output file already exists",
+                }
+                return skip_result
+
+            # Now proceed with the expensive processing since output file doesn't exist
             with zipfile.ZipFile(str(zip_path), "r") as zip_ref:
                 # Get the CSV file name (should be only one file)
                 csv_files = [f for f in zip_ref.namelist() if f.endswith(".csv")]
@@ -180,55 +230,6 @@ class DataProcessor:
                 }
                 return validation_error
 
-            # Determine output path
-            output_path = Path(output_dir)
-
-            zip_path_obj = Path(zip_path)
-            rel_path = get_relative_path(zip_path, base_data_dir)
-
-            if rel_path is None:
-                # Fallback: extract symbol and interval from filename
-                filename = zip_path_obj.stem  # e.g., BTCUSDT-1h-2024-12-31
-                parts = filename.split("-")
-                if len(parts) >= 2:
-                    symbol = parts[0]
-                    interval = parts[1]
-                    rel_path = (
-                        Path("spot")
-                        / "daily"
-                        / "klines"
-                        / symbol
-                        / interval
-                        / f"{filename}.{self.output_format}"
-                    )
-                else:
-                    path_error: ProcessResultError = {
-                        "status": "error",
-                        "file_path": zip_path,
-                        "error": "Could not determine output path from filename",
-                    }
-                    return path_error
-
-            # Remove 'data/' prefix if present
-            if rel_path.parts[0] == "data":
-                rel_path = remove_prefix_from_path(rel_path, "data")
-
-            # Change extension to .parquet or .csv
-            output_rel_path = rel_path.with_suffix(f".{self.output_format}")
-
-            # Create the full output path
-            final_path = output_path / output_rel_path
-
-            # Skip if output file already exists
-            if final_path.exists():
-                skip_result: ProcessResultSkipped = {
-                    "status": "skipped",
-                    "file_path": zip_path,
-                    "output_path": str(final_path),
-                    "reason": "Output file already exists",
-                }
-                return skip_result
-
             # Create output directory
             final_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -332,5 +333,17 @@ class DataProcessor:
                     else:
                         failed.append(result)
                         pbar.set_postfix({"Errors": len(failed)})
+
+        # Print output directory after processing
+        if successful:
+            # Get the output directory from the first successful or skipped result
+            for result in successful:
+                if "output_path" in result and result["output_path"]:
+                    output_path = Path(result["output_path"])
+                    output_dir = output_path.parent
+                    print(
+                        f"Processed {self.output_format.upper()} files location: {output_dir}"
+                    )
+                    break
 
         return successful, failed

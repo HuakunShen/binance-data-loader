@@ -277,6 +277,16 @@ class BinanceDataDownloader:
 
         print(f"\nDownloaded {downloaded_bytes / (1024 * 1024):.2f} MB of data")
 
+        # Print ZIP files directory
+        successful_downloads = sum(1 for r in results if r["status"] == "success")
+        skipped_downloads = sum(1 for r in results if r["status"] == "skipped")
+        if successful_downloads > 0 or skipped_downloads > 0:
+            # Get the parent directory of downloaded files
+            if download_tasks:
+                first_output_path = download_tasks[0][1]  # First task's output path
+                zip_dir = first_output_path.parent
+                print(f"ZIP files location: {zip_dir}")
+
         return results
 
     def _download_single_file(self, task: Tuple[str, Path, int]) -> DownloadResult:
