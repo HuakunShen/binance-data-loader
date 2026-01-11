@@ -302,7 +302,7 @@ class BinanceDataLoader:
                 ).row(0)[0]
                 # If first interval duration is less than 80% of target interval, skip it
                 if first_duration < interval_delta * 0.8:
-                    result = result.slice(1, len(result) - 1)
+                    result = result.slice(1)
 
             return result
         else:
