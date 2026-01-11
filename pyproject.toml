@@ -21,6 +21,7 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules",
 ]
 dependencies = [
+    "ipykernel>=7.1.0",
     "pandera>=0.28.0",
     "polars>=1.36.1",
     "requests>=2.32.5",

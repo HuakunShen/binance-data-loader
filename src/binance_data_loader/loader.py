@@ -14,6 +14,8 @@ class BinanceDataLoader:
         data_dir: Path,
         data_type: Literal["futures", "spot"] = "spot",
         output_format: Literal["parquet", "csv"] = "parquet",
+        shift: Optional[str] = None,
+        skip_first: bool = True,
     ):
         """
         Initialize Binance data loader.
@@ -22,10 +24,20 @@ class BinanceDataLoader:
             data_dir: Root directory containing processed Binance data
             data_type: Type of data - "futures" or "spot"
             output_format: Format of processed files - "parquet" or "csv"
+            shift: Optional time offset to shift resampling interval boundaries.
+                For example, with shift="1m" and resample_to="15m",
+                intervals will end at 1, 16, 31, 46 minutes instead of 0, 15, 30, 45.
+                Supports units: "1s", "5m", "1h", "1d", etc.
+                Default is None (no shift).
+            skip_first: Whether to skip the first row if it contains less data than
+                the full resample interval (useful when shifting causes partial intervals).
+                Default is True.
         """
         self.data_dir = Path(data_dir)
         self.data_type = data_type
         self.output_format = output_format
+        self.shift = shift
+        self.skip_first = skip_first
 
     def _build_path(self, symbol: str, interval: str) -> Path:
         """
@@ -125,6 +137,8 @@ class BinanceDataLoader:
         resample_to: Optional[str] = None,
         start_time: Optional[datetime] = None,
         end_time: Optional[datetime] = None,
+        shift: Optional[str] = None,
+        skip_first: Optional[bool] = None,
     ) -> pl.DataFrame:
         """
         Load kline data with optional resampling and time filtering.
@@ -137,6 +151,10 @@ class BinanceDataLoader:
             resample_to: Optional resampling interval (e.g., "5s", "15s", "5m", "15m", "1h", "1d")
             start_time: Optional start datetime. If None, uses 1 year before end_time.
             end_time: Optional end datetime. If None, uses latest available data.
+            shift: Optional override for shift. If None, uses value from __init__.
+            skip_first: Optional override for skip_first. If None, uses value from __init__.
+                Whether to skip the first row if it contains less data than
+                full resample interval (useful when shifting causes partial intervals).
 
         Returns:
             Polars DataFrame with kline data filtered to specified time range
@@ -196,18 +214,35 @@ class BinanceDataLoader:
 
         # Resample if requested and interval != resample_to
         if resample_to and interval != resample_to:
-            df = self.resample(df, resample_to)
+            shift_param = shift if shift is not None else self.shift
+            skip_first_param = skip_first if skip_first is not None else self.skip_first
+            df = self.resample(
+                df, resample_to, shift=shift_param, skip_first=skip_first_param
+            )
 
         return df
 
     @staticmethod
-    def resample(df: pl.DataFrame, interval: str) -> pl.DataFrame:
+    def resample(
+        df: pl.DataFrame,
+        interval: str,
+        shift: Optional[str] = None,
+        skip_first: bool = True,
+    ) -> pl.DataFrame:
         """
         Resample klines to a different interval.
 
         Args:
             df: Input kline DataFrame
             interval: Target interval (e.g., "5s", "15s", "5m", "15m", "1h", "1d")
+            shift: Optional time offset to shift interval boundaries.
+                For example, with shift="1m" and interval="15m",
+                intervals will end at 1, 16, 31, 46 minutes instead of 0, 15, 30, 45.
+                Supports units: "1s", "5m", "1h", "1d", etc.
+                Default is None (no shift).
+            skip_first: Whether to skip the first row if it contains less data than
+                the full resample interval (useful when shifting causes partial intervals).
+                Default is True.
 
         Returns:
             Resampled DataFrame with aggregated OHLCV data
@@ -220,21 +255,157 @@ class BinanceDataLoader:
             else pl.col("taker_buy_volume")
         )
 
-        return df.group_by_dynamic("open_time", every=interval, closed="left").agg(
-            [
-                pl.col("open").first().alias("open"),
-                pl.col("high").max().alias("high"),
-                pl.col("low").min().alias("low"),
-                pl.col("close").last().alias("close"),
-                pl.col("volume").sum().alias("volume"),
-                pl.col("close_time").last().alias("close_time"),
-                pl.col("quote_volume").sum().alias("quote_volume"),
-                count_col.sum().alias("trades"),
-                taker_buy_vol_col.sum().alias("taker_buy_base_volume"),
-                pl.col("taker_buy_quote_volume").sum().alias("taker_buy_quote_volume"),
-                pl.col("ignore").first().alias("ignore"),
-            ]
-        )
+        # Parse shift string to timedelta if provided
+        shift_delta = None
+        if shift:
+            shift_delta = BinanceDataLoader._parse_shift_to_timedelta(shift)
+
+        # Parse interval to timedelta for duration comparison
+        interval_delta = BinanceDataLoader._parse_interval_to_timedelta(interval)
+
+        # If shift is specified, create a shifted timestamp for grouping
+        if shift_delta:
+            df_shifted = df.with_columns(
+                (pl.col("open_time") - shift_delta).alias("_shifted_time")
+            )
+            result = df_shifted.group_by_dynamic(
+                "_shifted_time", every=interval, closed="left"
+            ).agg(
+                [
+                    pl.col("_shifted_time").first().alias("open_time"),
+                    pl.col("open").first().alias("open"),
+                    pl.col("high").max().alias("high"),
+                    pl.col("low").min().alias("low"),
+                    pl.col("close").last().alias("close"),
+                    pl.col("volume").sum().alias("volume"),
+                    pl.col("close_time").last().alias("close_time"),
+                    pl.col("quote_volume").sum().alias("quote_volume"),
+                    count_col.sum().alias("trades"),
+                    taker_buy_vol_col.sum().alias("taker_buy_base_volume"),
+                    pl.col("taker_buy_quote_volume")
+                    .sum()
+                    .alias("taker_buy_quote_volume"),
+                    pl.col("ignore").first().alias("ignore"),
+                ]
+            )
+            # Add the shift back to get the actual open_time
+            result = result.with_columns(
+                (pl.col("open_time") + shift_delta).alias("open_time"),
+                (pl.col("close_time") + shift_delta).alias("close_time"),
+            )
+
+            # Skip first row if it's a partial interval
+            if skip_first and len(result) > 0:
+                # Calculate duration of first interval
+                first_duration = result.select(
+                    (pl.col("close_time") - pl.col("open_time"))
+                ).row(0)[0]
+                # If first interval duration is less than 80% of target interval, skip it
+                if first_duration < interval_delta * 0.8:
+                    result = result.slice(1, len(result) - 1)
+
+            return result
+        else:
+            return df.group_by_dynamic("open_time", every=interval, closed="left").agg(
+                [
+                    pl.col("open").first().alias("open"),
+                    pl.col("high").max().alias("high"),
+                    pl.col("low").min().alias("low"),
+                    pl.col("close").last().alias("close"),
+                    pl.col("volume").sum().alias("volume"),
+                    pl.col("close_time").last().alias("close_time"),
+                    pl.col("quote_volume").sum().alias("quote_volume"),
+                    count_col.sum().alias("trades"),
+                    taker_buy_vol_col.sum().alias("taker_buy_base_volume"),
+                    pl.col("taker_buy_quote_volume")
+                    .sum()
+                    .alias("taker_buy_quote_volume"),
+                    pl.col("ignore").first().alias("ignore"),
+                ]
+            )
+
+    @staticmethod
+    def _parse_shift_to_timedelta(shift: str) -> timedelta:
+        """
+        Parse a shift string (e.g., "1m", "30s", "2h", "1d") to a timedelta.
+
+        Args:
+            shift: Shift string with value and unit (e.g., "1m", "30s", "2h", "1d")
+
+        Returns:
+            timedelta representing the shift
+
+        Raises:
+            ValueError: If shift format is invalid
+        """
+        if not shift or len(shift) < 2:
+            raise ValueError(
+                f"Invalid shift format: '{shift}'. Expected format: '1m', '30s', '2h', '1d', etc."
+            )
+
+        unit = shift[-1].lower()
+        try:
+            value = int(shift[:-1])
+        except ValueError:
+            raise ValueError(f"Invalid shift value in '{shift}'. Expected integer.")
+
+        unit_map = {
+            "s": ("seconds", value),
+            "m": ("minutes", value),
+            "h": ("hours", value),
+            "d": ("days", value),
+        }
+
+        if unit not in unit_map:
+            raise ValueError(
+                f"Invalid shift unit in '{shift}'. Expected 's', 'm', 'h', or 'd'."
+            )
+
+        unit_name, unit_value = unit_map[unit]
+        return timedelta(**{unit_name: unit_value})
+
+    @staticmethod
+    def _parse_interval_to_timedelta(interval: str) -> timedelta:
+        """
+        Parse an interval string (e.g., "15m", "1h", "1d") to a timedelta.
+
+        Args:
+            interval: Interval string with value and unit (e.g., "1m", "30s", "2h", "1d")
+
+        Returns:
+            timedelta representing the interval
+
+        Raises:
+            ValueError: If interval format is invalid
+        """
+        if not interval or len(interval) < 2:
+            raise ValueError(
+                f"Invalid interval format: '{interval}'. Expected format: '1m', '30s', '2h', '1d', etc."
+            )
+
+        unit = interval[-1].lower()
+        try:
+            value = int(interval[:-1])
+        except ValueError:
+            raise ValueError(
+                f"Invalid interval value in '{interval}'. Expected integer."
+            )
+
+        unit_map = {
+            "s": ("seconds", value),
+            "m": ("minutes", value),
+            "h": ("hours", value),
+            "d": ("days", value),
+            "w": ("weeks", value),
+        }
+
+        if unit not in unit_map:
+            raise ValueError(
+                f"Invalid interval unit in '{interval}'. Expected 's', 'm', 'h', 'd', or 'w'."
+            )
+
+        unit_name, unit_value = unit_map[unit]
+        return timedelta(**{unit_name: unit_value})
 
 
 # Convenience functions for quick loading without class instantiation
@@ -247,6 +418,8 @@ def load_kline_data(
     start_time: Optional[datetime] = None,
     end_time: Optional[datetime] = None,
     output_format: Literal["parquet", "csv"] = "parquet",
+    shift: Optional[str] = None,
+    skip_first: bool = True,
 ) -> pl.DataFrame:
     """
     Convenience function to load kline data.
@@ -260,11 +433,19 @@ def load_kline_data(
         start_time: Optional start datetime
         end_time: Optional end datetime
         output_format: Format of processed files - "parquet" or "csv"
+        shift: Optional time offset to shift resampling interval boundaries.
+            For example, with shift="1m" and resample_to="15m",
+            intervals will end at 1, 16, 31, 46 minutes instead of 0, 15, 30, 45.
+            Supports units: "1s", "5m", "1h", "1d", etc.
+            Default is None (no shift).
+        skip_first: Whether to skip the first row if it contains less data than
+            the full resample interval (useful when shifting causes partial intervals).
+            Default is True.
 
     Returns:
         Polars DataFrame with kline data
     """
-    loader = BinanceDataLoader(data_dir, data_type, output_format)
+    loader = BinanceDataLoader(data_dir, data_type, output_format, shift, skip_first)
     return loader.load(symbol, interval, resample_to, start_time, end_time)
 
 

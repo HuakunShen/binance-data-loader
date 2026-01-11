@@ -263,6 +263,112 @@ print(f"Found {len(df)} files")
 print(df.head())
 ```
 
+### BinanceDataLoader
+
+Loader for accessing and resampling downloaded Binance kline data.
+
+#### Constructor
+
+```python
+BinanceDataLoader(
+    data_dir: Path,
+    data_type: Literal["futures", "spot"] = "spot",
+    output_format: Literal["parquet", "csv"] = "parquet",
+    shift: Optional[str] = None,
+    skip_first: bool = True,
+)
+```
+
+**Parameters:**
+
+- `data_dir` (Path, required): Root directory containing processed Binance data
+- `data_type` (str, optional): Type of data - `"futures"` or `"spot"`. Default: `"spot"`
+- `output_format` (str, optional): Format of processed files - `"parquet"` or `"csv"`. Default: `"parquet"`
+- `shift` (str, optional): Time offset to shift resampling interval boundaries. For example, with `shift="1m"` and `resample_to="15m"`, intervals will end at 1, 16, 31, 46 minutes instead of 0, 15, 30, 45. Supports units: `"1s"`, `"5m"`, `"1h"`, `"1d"`, etc. Default: `None` (no shift)
+- `skip_first` (bool, optional): Whether to skip the first row if it contains less data than full resample interval. Useful when shifting causes partial intervals. Default: `True`
+
+#### Methods
+
+##### load()
+
+```python
+load(
+    symbol: str,
+    interval: str = "1m",
+    resample_to: Optional[str] = None,
+    start_time: Optional[datetime] = None,
+    end_time: Optional[datetime] = None,
+    shift: Optional[str] = None,
+    skip_first: Optional[bool] = None,
+) -> pl.DataFrame
+```
+
+Load kline data with optional resampling and time filtering.
+
+**Parameters:**
+
+- `symbol` (str, required): Trading pair symbol (e.g., "BTCUSDT")
+- `interval` (str, optional): Base interval of the data files (e.g., `"1s"`, `"1m"`, `"1h"`, `"1d"`). Default: `"1m"`
+- `resample_to` (str, optional): Resampling interval (e.g., `"5s"`, `"15s"`, `"5m"`, `"15m"`, `"1h"`, `"1d"`). Default: `None`
+- `start_time` (datetime, optional): Start datetime. If `None`, uses 1 year before end_time. Default: `None`
+- `end_time` (datetime, optional): End datetime. If `None`, uses latest available data. Default: `None`
+- `shift` (str, optional): Override for shift. If `None`, uses value from `__init__`. Default: `None`
+- `skip_first` (bool, optional): Override for skip_first. If `None`, uses value from `__init__`. Default: `None`
+
+**Returns:**
+
+- `pl.DataFrame`: Polars DataFrame with kline data filtered to specified time range
+
+**Example:**
+
+```python
+loader = BinanceDataLoader(
+    data_dir=Path("./data"),
+    data_type="spot",
+    shift="1m",  # Default shift for all loads
+)
+
+# Load with default shift
+df = loader.load("BTCUSDT", "1m", "15m")
+
+# Override shift and skip_first for this specific load
+df_custom = loader.load(
+    "BTCUSDT", "1m", "15m",
+    shift="30s",  # Custom shift
+    skip_first=False,  # Keep partial intervals
+)
+```
+
+##### get_date_range()
+
+```python
+get_date_range(symbol: str, interval: str = "1m") -> Tuple[datetime, datetime]
+```
+
+Get the date range available in processed data files.
+
+**Parameters:**
+
+- `symbol` (str, required): Trading pair symbol (e.g., "BTCUSDT")
+- `interval` (str, optional): Base interval of the data files (e.g., `"1s"`, `"1m"`, `"1h"`). Default: `"1m"`
+
+**Returns:**
+
+- `Tuple[datetime, datetime]`: (start_date, end_date) as datetime objects
+
+**Raises:**
+
+- `FileNotFoundError`: If no data files are found
+- `ValueError`: If data directory is empty
+
+**Example:**
+
+```python
+loader = BinanceDataLoader(data_dir="./data", data_type="spot")
+start, end = loader.get_date_range("ETHUSDT", "1s")
+print(f"Available data from {start} to {end}")
+```
+
 ## Data Loading and Resampling
 
 ### Loading Data
@@ -323,6 +429,69 @@ Supported resampling intervals:
 - Days: `1d`
 - Weeks: `1w`
 
+### Shifted Resampling
+
+Shift interval boundaries to create different data augmentations for training:
+
+```python
+# Default 15m intervals end at 0, 15, 30, 45 minutes
+df_standard = loader.load(
+    symbol="ETHUSDT",
+    interval="1m",
+    resample_to="15m",
+    start_time=start_time,
+    end_time=end_time,
+)
+
+# Shifted by 1m - intervals end at 1, 16, 31, 46 minutes
+df_shifted = loader.load(
+    symbol="ETHUSDT",
+    interval="1m",
+    resample_to="15m",
+    start_time=start_time,
+    end_time=end_time,
+    shift="1m",
+)
+```
+
+Shift supports multiple time units:
+- Seconds: `30s`, `45s`
+- Minutes: `1m`, `5m`, `10m`
+- Hours: `2h`, `6h`
+- Days: `1d`, `3d`
+
+**Use case**: Generate multiple shifted versions of your data (e.g., `0m`, `1m`, `2m`, `3m`) for data augmentation during model training. This helps models learn patterns regardless of interval alignment.
+
+### Skip Partial Intervals
+
+When shifting intervals, the first interval may contain partial data. Use `skip_first` to remove it:
+
+```python
+# Skip partial intervals (default behavior)
+df = loader.load(
+    symbol="ETHUSDT",
+    interval="1m",
+    resample_to="4h",
+    start_time=start_time,
+    end_time=end_time,
+    shift="1m",
+    # skip_first=True  # Default, removes partial first interval
+)
+
+# Keep all intervals including partial
+df_all = loader.load(
+    symbol="ETHUSDT",
+    interval="1m",
+    resample_to="4h",
+    start_time=start_time,
+    end_time=end_time,
+    shift="1m",
+    skip_first=False,  # Keep partial intervals
+)
+```
+
+A partial interval is removed if its duration is less than 80% of the target resample interval. This prevents biased data at the start when shifting causes incomplete first intervals.
+
 ### Convenience Functions
 
 Quick loading without class instantiation:
@@ -347,6 +516,8 @@ df = load_kline_data(
     resample_to="1d",
     start_time=datetime(2024, 1, 1),
     end_time=datetime(2024, 12, 31),
+    shift="1h",  # Optional shift for interval boundaries
+    skip_first=True,  # Optional: skip partial first interval
 )
 ```
 
@@ -422,6 +593,9 @@ The library includes several example scripts in the `examples/` folder to help y
   - Load futures data
   - Complete workflow showing load, resample, and compare different timeframes
   - Load data for specific date ranges
+  - **Shift resampling with different time offsets** (`shift` parameter)
+  - **Skip partial intervals when shifting** (`skip_first` parameter)
+  - **Generate multiple shifted datasets for training data augmentation**
 
 ### Running the Examples
 

@@ -157,7 +157,7 @@ def example_combined_workflow():
     print(f"5m resampled: {len(df_5m)} rows")
     print(f"1h resampled: {len(df_1h)} rows")
 
-    print(f"\nReduction ratio:")
+    print("\nReduction ratio:")
     print(f"  1m -> 5m: {len(df_1m) / len(df_5m):.1f}x reduction")
     print(f"  1m -> 1h: {len(df_1m) / len(df_1h):.1f}x reduction")
 
@@ -179,6 +179,148 @@ def example_specific_date_range():
     print("Loaded data from 2024-01-01 to 2024-01-07")
     print(f"Shape: {df.shape}")
     print(df.head())
+
+
+def example_shifted_resampling():
+    """Example: Resample with shifted interval boundaries."""
+    print("\n=== Shifted Resampling Example ===")
+
+    loader = BinanceDataLoader(
+        data_dir=Path("./data"),
+        data_type="spot",
+        output_format="parquet",
+    )
+
+    # Load with no shift - intervals end at 0, 15, 30, 45 minutes
+    print("\n--- Standard 15m intervals (no shift) ---")
+    df_standard = loader.load(
+        symbol="ETHUSDT",
+        interval="1m",
+        resample_to="15m",
+        start_time=datetime(2024, 1, 1, tzinfo=UTC),
+        end_time=datetime(2024, 1, 2, tzinfo=UTC),
+    )
+    print(
+        f"Standard intervals: {df_standard.select('open_time').to_series().to_list()[:3]}"
+    )
+    print(f"Shape: {df_standard.shape}")
+
+    # Load with 1 minute shift - intervals end at 1, 16, 31, 46 minutes
+    print("\n--- 15m intervals shifted by 1 minute ---")
+    df_shifted_1m = loader.load(
+        symbol="ETHUSDT",
+        interval="1m",
+        resample_to="15m",
+        start_time=datetime(2024, 1, 1, tzinfo=UTC),
+        end_time=datetime(2024, 1, 2, tzinfo=UTC),
+        shift="1m",
+    )
+    print(
+        f"Shifted intervals: {df_shifted_1m.select('open_time').to_series().to_list()[:3]}"
+    )
+    print(f"Shape: {df_shifted_1m.shape}")
+
+    # Load with 30 seconds shift - intervals end at 00:30, 15:30, 30:30, 45:30
+    print("\n--- 15m intervals shifted by 30 seconds ---")
+    df_shifted_30s = loader.load(
+        symbol="ETHUSDT",
+        interval="1m",
+        resample_to="15m",
+        start_time=datetime(2024, 1, 1, tzinfo=UTC),
+        end_time=datetime(2024, 1, 2, tzinfo=UTC),
+        shift="30s",
+    )
+    print(
+        f"Shifted intervals: {df_shifted_30s.select('open_time').to_series().to_list()[:3]}"
+    )
+    print(f"Shape: {df_shifted_30s.shape}")
+
+
+def example_skip_partial_intervals():
+    """Example: Skip partial intervals when shifting."""
+    print("\n=== Skip Partial Intervals Example ===")
+
+    loader = BinanceDataLoader(
+        data_dir=Path("./data"),
+        data_type="spot",
+        output_format="parquet",
+    )
+
+    # Load with shift and skip_first=True (default)
+    # This removes the first row if it contains less than 80% of the interval
+    print("\n--- With shift='1m' and skip_first=True (default) ---")
+    df_with_skip = loader.load(
+        symbol="ETHUSDT",
+        interval="1m",
+        resample_to="4h",
+        start_time=datetime(2024, 1, 1, tzinfo=UTC),
+        end_time=datetime(2024, 1, 2, tzinfo=UTC),
+        shift="1m",
+    )
+    print(f"Shape: {df_with_skip.shape}")
+    print(
+        f"First 3 open times: {df_with_skip.select('open_time').to_series().to_list()[:3]}"
+    )
+    print(df_with_skip.head(3))
+
+    # Load with shift and skip_first=False
+    # This keeps all rows including partial first interval
+    print("\n--- With shift='1m' and skip_first=False ---")
+    df_without_skip = loader.load(
+        symbol="ETHUSDT",
+        interval="1m",
+        resample_to="4h",
+        start_time=datetime(2024, 1, 1, tzinfo=UTC),
+        end_time=datetime(2024, 1, 2, tzinfo=UTC),
+        shift="1m",
+        skip_first=False,
+    )
+    print(f"Shape: {df_without_skip.shape}")
+    print(
+        f"First 3 open times: {df_without_skip.select('open_time').to_series().to_list()[:3]}"
+    )
+    print(df_without_skip.head(3))
+
+    print("\nNote: skip_first=True removes the first row if it contains")
+    print("less than 80% of the full resample interval (partial interval).")
+
+
+def example_training_data_generation():
+    """Example: Generate multiple shifted datasets for training."""
+    print("\n=== Training Data Generation Example ===")
+
+    loader = BinanceDataLoader(
+        data_dir=Path("./data"),
+        data_type="spot",
+        output_format="parquet",
+    )
+
+    start_time = datetime(2024, 1, 1, tzinfo=UTC)
+    end_time = datetime(2024, 1, 2, tzinfo=UTC)
+
+    print("Generating multiple shifted 15m datasets for data augmentation...")
+
+    # Generate 4 different shifted versions for training
+    shifts = ["0m", "1m", "2m", "3m"]
+    datasets = {}
+
+    for shift in shifts:
+        df = loader.load(
+            symbol="ETHUSDT",
+            interval="1m",
+            resample_to="15m",
+            start_time=start_time,
+            end_time=end_time,
+            shift=shift,
+        )
+        datasets[shift] = df
+        print(
+            f"  Shift {shift}: {len(df)} rows, first at {df.select('open_time').item()}"
+        )
+
+    print(f"\nGenerated {len(datasets)} datasets for training data augmentation")
+    print("Each dataset represents the same underlying data with different")
+    print("interval alignments, useful for model robustness testing.")
 
 
 if __name__ == "__main__":
@@ -203,3 +345,22 @@ if __name__ == "__main__":
     example_load_futures_data()
     example_combined_workflow()
     example_specific_date_range()
+
+    # Example 6: Shifted resampling
+    # example_shifted_resampling()
+
+    # Example 7: Skip partial intervals
+    # example_skip_partial_intervals()
+
+    # Example 8: Generate training data
+    # example_training_data_generation()
+
+    # Run all examples
+    example_load_spot_data()
+    example_resample_to_higher_timeframes()
+    example_load_futures_data()
+    example_combined_workflow()
+    example_specific_date_range()
+    example_shifted_resampling()
+    example_skip_partial_intervals()
+    example_training_data_generation()
