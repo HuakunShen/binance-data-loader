@@ -58,3 +58,40 @@ def remove_prefix_from_path(rel_path: Path, prefix: str) -> Path:
     if parts and parts[0] == prefix.strip("/"):
         return Path(*parts[1:])
     return rel_path
+
+
+def parse_interval_ms(interval: str) -> int:
+    """Parse a duration string to milliseconds.
+
+    Supports: Xms (milliseconds), Xs (seconds), Xm (minutes), Xh (hours).
+
+    Args:
+        interval: Duration string, e.g. "500ms", "1s", "5s", "1m", "1h"
+
+    Returns:
+        Duration in milliseconds
+
+    Raises:
+        ValueError: If the format is not supported
+
+    Examples:
+        >>> parse_interval_ms("500ms")
+        500
+        >>> parse_interval_ms("1s")
+        1000
+        >>> parse_interval_ms("1m")
+        60000
+        >>> parse_interval_ms("1h")
+        3600000
+    """
+    if interval.endswith("ms"):
+        return int(interval[:-2])
+    elif interval.endswith("s"):
+        return int(interval[:-1]) * 1_000
+    elif interval.endswith("m"):
+        return int(interval[:-1]) * 60_000
+    elif interval.endswith("h"):
+        return int(interval[:-1]) * 3_600_000
+    raise ValueError(
+        f"Unsupported interval format: {interval!r}. Use Xms / Xs / Xm / Xh."
+    )

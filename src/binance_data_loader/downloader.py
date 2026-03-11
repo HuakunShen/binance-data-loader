@@ -1,412 +1,292 @@
-"""Main downloader class for Binance Vision data."""
+"""Processor-first BinanceDataDownloader: pure download infrastructure."""
 
-import glob
+import os
+import sys
 import time
-import requests
-import polars as pl
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Literal, Tuple, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Optional
+
+import polars as pl
+import requests
 from tqdm import tqdm
 
 from binance_data_loader.metadata import BinanceDataMetadata
-from binance_data_loader.processor import DataProcessor
-from binance_data_loader.types import (
-    DownloadResult,
-    ProcessResult,
-    DownloadResultSuccess,
-    DownloadResultSkipped,
-    DownloadResultError,
-)
+from binance_data_loader.processors.base import BaseProcessor
+from binance_data_loader.types import AssetType
+
+# Base URL for downloading (different from S3 metadata URL)
+DEFAULT_DOWNLOAD_BASE_URL = "https://data.binance.vision"
+
+
+@dataclass
+class DownloadSummary:
+    """Summary of a download run.
+
+    Attributes:
+        ok:           Files newly downloaded and processed successfully
+        skipped:      Files already on disk (valid), skipped
+        not_found:    Files that returned HTTP 404 (not yet available on S3)
+        errors:       Files that failed due to network or processing errors
+        error_details: Human-readable error messages for each failed file
+    """
+
+    ok: int = 0
+    skipped: int = 0
+    not_found: int = 0
+    errors: int = 0
+    error_details: list[str] = field(default_factory=list)
+
+    @property
+    def total(self) -> int:
+        return self.ok + self.skipped + self.not_found + self.errors
+
+    def __str__(self) -> str:
+        return (
+            f"ok={self.ok} skipped={self.skipped} "
+            f"not_found={self.not_found} errors={self.errors}"
+        )
+
+
+def _download_one(
+    symbol: str,
+    s3_key: str,
+    processor: BaseProcessor,
+    destination_dir: Path,
+    base_url: str,
+    keep_zip: bool,
+) -> tuple[str, str]:
+    """Download a single file, process it, and write parquet.
+
+    Args:
+        symbol:          Trading pair symbol (used only for error messages)
+        s3_key:          Full S3 key, e.g. "data/spot/daily/klines/BTCUSDT/1m/..."
+        processor:       Processor that owns parsing and path logic
+        destination_dir: Root output directory
+        base_url:        Download base URL (not S3 listing URL)
+        keep_zip:        If True, also write the raw ZIP bytes alongside the parquet
+
+    Returns:
+        Tuple (status, detail) where status ∈ {"ok", "skipped", "not_found", "error"}
+        and detail is an empty string on success or an error message.
+    """
+    out = processor.output_path(s3_key, destination_dir)
+    if processor.is_output_valid(out):
+        return "skipped", ""
+
+    url = f"{base_url}/{s3_key}"
+    zip_bytes: Optional[bytes] = None
+    retry_delay = 1.0
+
+    for attempt in range(3):
+        try:
+            resp = requests.get(url, timeout=60)
+            if resp.status_code == 404:
+                return "not_found", ""
+            resp.raise_for_status()
+            zip_bytes = resp.content
+            break
+        except requests.RequestException as exc:
+            if attempt < 2:
+                time.sleep(retry_delay)
+                retry_delay *= 2
+            else:
+                # Extract date from the last filename in s3_key (if possible)
+                fname = s3_key.rsplit("/", 1)[-1]
+                return "error", f"{symbol} {fname}: {exc}"
+
+    if zip_bytes is None:
+        return "error", f"{symbol} {s3_key}: no bytes downloaded"
+
+    try:
+        df = processor.process(zip_bytes)
+    except Exception as exc:
+        fname = s3_key.rsplit("/", 1)[-1]
+        return "error", f"{symbol} {fname} [process]: {exc}"
+
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        df.write_parquet(out, compression="snappy")
+    except Exception as exc:
+        fname = s3_key.rsplit("/", 1)[-1]
+        return "error", f"{symbol} {fname} [write]: {exc}"
+
+    if keep_zip:
+        # Write ZIP to destination_dir / s3_key-without-"data/"-prefix
+        zip_path = destination_dir / s3_key.removeprefix("data/")
+        try:
+            zip_path.parent.mkdir(parents=True, exist_ok=True)
+            zip_path.write_bytes(zip_bytes)
+        except Exception:
+            pass  # Ignore ZIP preservation failure as it is not fatal
+
+    return "ok", ""
 
 
 class BinanceDataDownloader:
-    """
-    Download and process Binance Vision historical data.
+    """Download and process Binance Vision historical data.
 
-    This is the main API for binance-data library. It handles:
-    1. Fetching file metadata from Binance S3 bucket
-    2. Downloading ZIP files concurrently
-    3. Converting to Parquet or CSV format with validation
-    4. Optional cleanup of raw ZIP files
+    Processor-first design: all data-type-specific logic (S3 path, output path,
+    CSV parsing, validation) lives in the BaseProcessor subclass. This class is
+    pure infrastructure — S3 listing, concurrent HTTP download, progress bars.
+
+    Usage::
+
+        from binance_data_loader import BinanceDataDownloader, KlineProcessor, AssetType
+
+        summary = BinanceDataDownloader(
+            symbol="BTCUSDT",
+            processor=KlineProcessor(interval="1m"),
+            asset_type=AssetType.FUTURES_UM,
+            destination_dir=Path("/data/binance"),
+        ).download()
+        print(summary)  # ok=1234 skipped=56 not_found=0 errors=0
     """
 
     def __init__(
         self,
-        prefix: str,
+        symbol: str,
+        processor: BaseProcessor,
+        asset_type: AssetType = AssetType.SPOT,
         destination_dir: Path = Path("./data"),
-        output_format: Literal["parquet", "csv"] = "parquet",
-        keep_zip: bool = True,
+        keep_zip: bool = False,
         max_workers: int = 10,
-        max_processors: int = 4,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
-        skip_download: bool = False,
-        base_url: str = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision",
-    ):
-        """
-        Initialize Binance data downloader.
+        base_url: str = DEFAULT_DOWNLOAD_BASE_URL,
+    ) -> None:
+        """Initialize BinanceDataDownloader.
 
         Args:
-            prefix: Required prefix for data download
-                   (e.g., "data/futures/um/daily/klines/BTCUSDT/1h/")
-            destination_dir: Output directory for processed files (default: "./data")
-            output_format: Output format, either "parquet" or "csv" (default: "parquet")
-            keep_zip: Whether to keep raw ZIP files after processing (default: True)
-            max_workers: Number of concurrent download workers (default: 10)
-            max_processors: Number of parallel processing workers (default: 4)
-            start_date: Optional start datetime for filtering. Only download files from this date onwards.
-            end_date: Optional end datetime for filtering. Only download files up to this date.
-            skip_download: If True, skip downloading and only process existing ZIP files (default: False)
-            base_url: Base URL for Binance data S3 bucket
+            symbol:          Trading pair symbol (e.g., "BTCUSDT")
+            processor:       Processor instance that owns data-type logic
+            asset_type:      Market type (SPOT, FUTURES_UM, etc.)
+            destination_dir: Root directory for output files
+            keep_zip:        Whether to keep raw ZIP bytes on disk (default False)
+            max_workers:     Number of concurrent download threads (default 10)
+            start_date:      Optional start datetime filter (inclusive)
+            end_date:        Optional end datetime filter (inclusive; default: yesterday)
+            base_url:        Download base URL (default https://data.binance.vision)
         """
-        self.prefix = prefix
+        self.symbol = symbol
+        self.processor = processor
+        self.asset_type = asset_type
         self.destination_dir = (
             destination_dir
             if isinstance(destination_dir, Path)
             else Path(destination_dir)
         )
-        self.output_format = output_format.lower()
         self.keep_zip = keep_zip
         self.max_workers = max_workers
-        self.max_processors = max_processors
-        self.base_url = base_url
         self.start_date = start_date
         self.end_date = end_date
-        self.skip_download = skip_download
+        self.base_url = base_url
 
-        # Validate output format
-        if self.output_format not in ["parquet", "csv"]:
-            raise ValueError("output_format must be 'parquet' or 'csv'")
+        self._metadata = BinanceDataMetadata()
 
-        # Initialize components
-        self.metadata_fetcher = BinanceDataMetadata()
-        self.data_processor = DataProcessor(output_format=self.output_format)
+    def download(self) -> DownloadSummary:
+        """Fetch the file list and download/process all files.
 
-    def download(
-        self,
-    ) -> Tuple[List[DownloadResult], Tuple[List[ProcessResult], List[ProcessResult]]]:
-        """
-        Download and process Binance data.
+        Files that are already valid on disk are skipped automatically.
+        Ctrl+C is handled cleanly — in-flight workers are cancelled and
+        already-written files remain intact.
 
         Returns:
-            Tuple of (download_results, (process_successful, process_failed))
-            - download_results: List of download success/failure info
-            - process_successful: List of successfully processed files
-            - process_failed: List of failed process attempts
+            DownloadSummary with counts per status and error details
         """
-        print(f"Starting download for prefix: {self.prefix}")
-        print(f"Output format: {self.output_format.upper()}")
-        print(f"Destination: {self.destination_dir}")
+        prefix = self.processor.s3_prefix(self.symbol, self.asset_type)
+        print(f"\n=== {self.symbol} ({self.asset_type.value}) ===")
+        print(f"Prefix      : {prefix}")
+        print(f"Destination : {self.destination_dir}")
 
-        # Step 1: Fetch file list
-        print("\n=== Step 1: Fetching file list ===")
-        date_range = ""
-        if self.start_date or self.end_date:
-            date_range = f" ({self.start_date.strftime('%Y-%m-%d') if self.start_date else self.start_date} to {self.end_date.strftime('%Y-%m-%d') if self.end_date else self.end_date or 'yesterday'})"
-        print(f"Time range{date_range}")
-        file_list_df = self.metadata_fetcher.fetch_file_list(
-            self.prefix, end_date=self.end_date
-        )
+        file_list_df = self._metadata.fetch_file_list(prefix, end_date=self.end_date)
 
         if file_list_df.is_empty():
-            print("No files found for given prefix.")
-            return [], ([], [])
+            print("No files found.")
+            return DownloadSummary()
 
-        print(f"\nFound {len(file_list_df)} files in metadata")
+        # Date range filtering
+        filtered_df = self._filter_by_date(file_list_df)
+        if filtered_df.is_empty():
+            print("No files in specified date range.")
+            return DownloadSummary()
 
-        # Step 2: Download ZIP files (only if not skipping and files don't exist)
-        if self.skip_download:
-            print("\n=== Step 2: Skipping download ===")
-            print("Skip download mode enabled. Using existing ZIP files.")
-            download_results = []
-        else:
-            print("\n=== Step 2: Downloading ZIP files ===")
-            download_results = self._download_files(file_list_df)
+        print(f"Files to process: {len(filtered_df)}")
 
-        # Count download results
-        successful_downloads = sum(
-            1 for r in download_results if r["status"] == "success"
-        )
-        skipped_downloads = sum(1 for r in download_results if r["status"] == "skipped")
-        failed_downloads = (
-            len(download_results) - successful_downloads - skipped_downloads
-        )
+        summary = DownloadSummary()
+        rows = filtered_df.to_dicts()
 
-        if not self.skip_download:
-            print(
-                f"\nDownload complete: {successful_downloads} successful, {skipped_downloads} skipped, {failed_downloads} failed"
-            )
-
-        # Step 3: Process all ZIP files (not just newly downloaded ones)
-        print("\n=== Step 3: Processing files ===")
-
-        # Get all existing ZIP files in the destination directory
-        all_zip_files = self._get_existing_zip_files()
-
-        if not all_zip_files:
-            print("No ZIP files found to process.")
-            return download_results, ([], [])
-
-        print(f"Found {len(all_zip_files)} ZIP files to process")
-
-        process_results = self.data_processor.process_zip_files(
-            zip_files=all_zip_files,
-            output_dir=self.destination_dir,
-            base_data_dir=self.destination_dir,
-            max_workers=self.max_processors,
-        )
-
-        # Count process results
-        successful_processes = sum(
-            1 for r in process_results[0] if r["status"] == "success"
-        )
-        skipped_processes = sum(
-            1 for r in process_results[0] if r["status"] == "skipped"
-        )
-        failed_processes = len(process_results[1])
-
-        print(
-            f"\nProcessing complete: {successful_processes} successful, {skipped_processes} skipped, {failed_processes} failed"
-        )
-
-        # Step 4: Clean up ZIP files if requested
-        if not self.keep_zip and not self.skip_download:
-            print("\n=== Step 4: Cleaning up ZIP files ===")
-            # Only clean up newly downloaded files
-            newly_downloaded = [
-                Path(r["zip_path"])
-                for r in download_results
-                if r["status"] == "success"
-            ]
-            cleanup_count = self._cleanup_zip_files(newly_downloaded)
-            print(f"Deleted {cleanup_count} ZIP files")
-
-        return download_results, process_results
-
-    def _download_files(self, file_list_df: pl.DataFrame) -> List[DownloadResult]:
-        """
-        Download files concurrently.
-
-        Args:
-            file_list_df: Polars DataFrame with file metadata
-
-        Returns:
-            List of download results
-        """
-        # Filter files by date range before downloading
-        filtered_df = file_list_df
-        if self.start_date or self.end_date:
-            if self.start_date:
-                start_str = self.start_date.strftime("%Y-%m-%d")
-                filtered_df = filtered_df.filter(pl.col("Date") >= start_str)
-
-            if self.end_date:
-                end_str = self.end_date.strftime("%Y-%m-%d")
-                filtered_df = filtered_df.filter(pl.col("Date") <= end_str)
-
-        # Update file list after filtering
-        file_list_df = filtered_df
-
-        # If no files after filtering, return early
-        if file_list_df.is_empty():
-            print("No files found in specified date range.")
-            return []
-
-        results = []
-        total_size = file_list_df["Size"].sum()
-        downloaded_bytes = 0
-
-        # Prepare download tasks
-        download_tasks = []
-        for row in file_list_df.iter_rows(named=True):
-            key = row["Key"]
-            size = row["Size"]
-            # Remove 'data/' prefix from key if present to avoid double prefix
-            key_without_prefix = key.lstrip("data/")
-            output_path = self.destination_dir / key_without_prefix
-            download_tasks.append((key, output_path, size))
-
-        # Download with progress tracking
-        with tqdm(
-            total=len(download_tasks), desc="Downloading files", unit="file"
-        ) as file_pbar:
-            with tqdm(
-                total=total_size, desc="Download progress", unit="B", unit_scale=True
-            ) as bytes_pbar:
-                with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-                    # Submit all download tasks
-                    future_to_task = {
-                        executor.submit(self._download_single_file, task): task
-                        for task in download_tasks
-                    }
-
-                    # Process results as they complete
-                    for future in as_completed(future_to_task):
-                        task = future_to_task[future]
-                        key, output_path, size = task
-
-                        try:
-                            result = future.result()
-                            results.append(result)
-
-                            if result["status"] == "success":
-                                downloaded_bytes += size
-                                bytes_pbar.update(size)
-
-                            file_pbar.update(1)
-
-                            # Update progress
-                            percentage = (downloaded_bytes / total_size) * 100
-                            file_pbar.set_postfix(
-                                {
-                                    "Size": f"{percentage:.1f}%",
-                                }
-                            )
-
-                        except Exception as e:
-                            results.append(
-                                {
-                                    "status": "error",
-                                    "key": key,
-                                    "error": f"Task error: {str(e)}",
-                                }
-                            )
-                            file_pbar.update(1)
-
-        print(f"\nDownloaded {downloaded_bytes / (1024 * 1024):.2f} MB of data")
-
-        # Print ZIP files directory
-        successful_downloads = sum(1 for r in results if r["status"] == "success")
-        skipped_downloads = sum(1 for r in results if r["status"] == "skipped")
-        if successful_downloads > 0 or skipped_downloads > 0:
-            # Get the parent directory of downloaded files
-            if download_tasks:
-                first_output_path = download_tasks[0][1]  # First task's output path
-                zip_dir = first_output_path.parent
-                print(f"ZIP files location: {zip_dir}")
-
-        return results
-
-    def _download_single_file(self, task: Tuple[str, Path, int]) -> DownloadResult:
-        """
-        Download a single file.
-
-        Args:
-            task: Tuple of (key, output_path, size)
-
-        Returns:
-            Download result dictionary
-        """
-        key, output_path, size = task
-
-        # Skip if file already exists
-        if output_path.exists():
-            result: DownloadResultSkipped = {
-                "status": "skipped",
-                "key": key,
-                "zip_path": str(output_path),
-                "reason": "File already exists",
+        pool = ThreadPoolExecutor(max_workers=self.max_workers)
+        try:
+            future_to_key = {
+                pool.submit(
+                    _download_one,
+                    self.symbol,
+                    row["Key"],
+                    self.processor,
+                    self.destination_dir,
+                    self.base_url,
+                    self.keep_zip,
+                ): row["Key"]
+                for row in rows
             }
-            return result
 
-        # Create directory if it doesn't exist
-        output_dir = output_path.parent
-        if output_dir != Path("."):
-            output_dir.mkdir(parents=True, exist_ok=True)
+            with tqdm(total=len(rows), desc="Downloading", unit="file") as pbar:
+                for future in as_completed(future_to_key):
+                    try:
+                        status, detail = future.result()
+                    except Exception as exc:
+                        key = future_to_key[future]
+                        status, detail = "error", f"{self.symbol} {key}: {exc}"
 
-        # Download with retry logic
-        max_retries = 3
-        retry_delay = 1  # seconds
+                    if status == "ok":
+                        summary.ok += 1
+                    elif status == "skipped":
+                        summary.skipped += 1
+                    elif status == "not_found":
+                        summary.not_found += 1
+                    else:
+                        summary.errors += 1
+                        if detail:
+                            summary.error_details.append(detail)
+                        tqdm.write(f"ERROR: {detail}")
 
-        for attempt in range(max_retries):
-            try:
-                url = f"{self.base_url}/{key}"
-                response = requests.get(url, timeout=60)
-                response.raise_for_status()
+                    pbar.update(1)
+                    pbar.set_postfix(
+                        {
+                            "ok": summary.ok,
+                            "skip": summary.skipped,
+                            "err": summary.errors,
+                        }
+                    )
 
-                with open(output_path, "wb") as f:
-                    f.write(response.content)
+        except KeyboardInterrupt:
+            print("\n\nInterrupted — cancelling pending tasks...")
+            pool.shutdown(wait=False, cancel_futures=True)
+            print("Done. Re-run anytime; completed files will be skipped.")
+            os._exit(0)
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
 
-                success_result: DownloadResultSuccess = {
-                    "status": "success",
-                    "key": key,
-                    "zip_path": output_path,
-                    "size": size,
-                }
-                return success_result
+        print(f"Result: {summary}")
+        return summary
 
-            except Exception as e:
-                if attempt < max_retries - 1:
-                    time.sleep(retry_delay)
-                    retry_delay *= 2  # Exponential backoff
-                else:
-                    error_result: DownloadResultError = {
-                        "status": "error",
-                        "key": key,
-                        "error": str(e),
-                    }
-                    return error_result
-
-        max_retry_error: DownloadResultError = {
-            "status": "error",
-            "key": key,
-            "error": "Max retries exceeded",
-        }
-        return max_retry_error
-
-    def _cleanup_zip_files(self, zip_files: List[Path]) -> int:
-        """
-        Delete downloaded ZIP files.
+    def _filter_by_date(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Apply start_date / end_date filters to the file list DataFrame.
 
         Args:
-            zip_files: List of ZIP file paths to delete
+            df: DataFrame with at least a "Date" column (string "YYYY-MM-DD")
 
         Returns:
-            Number of files deleted
+            Filtered DataFrame
         """
-        deleted_count = 0
-
-        for zip_path in zip_files:
-            try:
-                if zip_path.exists():
-                    zip_path.unlink()
-                    deleted_count += 1
-            except Exception as e:
-                print(f"Warning: Failed to delete {zip_path}: {e}")
-
-        return deleted_count
-
-    def _get_existing_zip_files(self) -> List[Path]:
-        """
-        Get list of existing ZIP files in the destination directory that match the prefix.
-
-        Returns:
-            List of ZIP file paths
-        """
-        # Try to find ZIP files at both possible locations:
-        # 1. New location: destination_dir / key_without_prefix (e.g., ./data/futures/...)
-        # 2. Old location: destination_dir / full_key (e.g., ./data/data/futures/...)
-
-        # New location pattern (remove 'data/' from prefix)
-        prefix_without_data = self.prefix.lstrip("data/")
-        pattern_new = str(self.destination_dir / prefix_without_data / "*.zip")
-
-        # Old location pattern (keep full prefix)
-        pattern_old = str(self.destination_dir / self.prefix / "*.zip")
-
-        # Find all matching ZIP files from both locations
-        zip_files = []
-        zip_files.extend([Path(f) for f in glob.glob(pattern_new, recursive=True)])
-        zip_files.extend([Path(f) for f in glob.glob(pattern_old, recursive=True)])
-
-        # Deduplicate while preserving order
-        seen = set()
-        unique_zip_files = []
-        for f in zip_files:
-            if str(f) not in seen:
-                seen.add(str(f))
-                unique_zip_files.append(f)
-
-        return unique_zip_files
+        result = df
+        if self.start_date is not None:
+            start_str = self.start_date.strftime("%Y-%m-%d")
+            result = result.filter(pl.col("Date") >= start_str)
+        if self.end_date is not None:
+            end_str = self.end_date.strftime("%Y-%m-%d")
+            result = result.filter(pl.col("Date") <= end_str)
+        return result

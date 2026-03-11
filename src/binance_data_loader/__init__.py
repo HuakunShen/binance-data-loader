@@ -1,39 +1,55 @@
 """
-binance-data - A Python library for downloading and processing Binance Vision data.
+binance-data-loader — download and process Binance Vision historical data.
+
+Processor-first architecture:
+    - BinanceDataDownloader  pure download infrastructure (S3 list + HTTP + progress)
+    - KlineProcessor         all kline-specific logic (path, parsing, validation)
+    - AggTradeProcessor      all aggTrades-specific logic (path, parsing, resample)
+    - BaseProcessor          ABC to implement custom data types
+
+Quick start::
+
+    from binance_data_loader import BinanceDataDownloader, KlineProcessor, AssetType
+    from pathlib import Path
+
+    summary = BinanceDataDownloader(
+        symbol="BTCUSDT",
+        processor=KlineProcessor(interval="1m"),
+        asset_type=AssetType.FUTURES_UM,
+        destination_dir=Path("/data/binance"),
+    ).download()
+    print(summary)
 """
 
-from binance_data_loader.downloader import BinanceDataDownloader
-from binance_data_loader.processor import DataProcessor
-from binance_data_loader.metadata import BinanceDataMetadata
+from binance_data_loader.downloader import BinanceDataDownloader, DownloadSummary
 from binance_data_loader.loader import (
     BinanceDataLoader,
-    load_kline_data,
     get_date_range,
+    load_kline_data,
 )
-from binance_data_loader.types import (
-    DownloadResult,
-    DownloadResultSuccess,
-    DownloadResultSkipped,
-    DownloadResultError,
-    ProcessResult,
-    ProcessResultSuccess,
-    ProcessResultSkipped,
-    ProcessResultError,
+from binance_data_loader.metadata import BinanceDataMetadata
+from binance_data_loader.processors import (
+    AggTradeProcessor,
+    BaseProcessor,
+    KlineProcessor,
 )
+from binance_data_loader.types import AssetType, DataType
 
 __all__ = [
+    # Downloader
     "BinanceDataDownloader",
-    "DataProcessor",
-    "BinanceDataMetadata",
+    "DownloadSummary",
+    # Processors
+    "BaseProcessor",
+    "KlineProcessor",
+    "AggTradeProcessor",
+    # Loader
     "BinanceDataLoader",
     "load_kline_data",
     "get_date_range",
-    "DownloadResult",
-    "DownloadResultSuccess",
-    "DownloadResultSkipped",
-    "DownloadResultError",
-    "ProcessResult",
-    "ProcessResultSuccess",
-    "ProcessResultSkipped",
-    "ProcessResultError",
+    # Metadata
+    "BinanceDataMetadata",
+    # Enums
+    "AssetType",
+    "DataType",
 ]
