@@ -222,6 +222,55 @@ class BinanceDataLoader:
 
         return df
 
+    def load_aggtrades(
+        self,
+        symbol: str,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+    ) -> pl.DataFrame:
+        """Load aggTrades OFI data (buy_vol, sell_vol, n_trades) resampled to 1s.
+
+        Files are at: {data_dir}/spot/daily/aggTrades/{symbol}/{symbol}-aggTrades-YYYY-MM-DD.parquet
+        Schema: timestamp_ms (Int64), buy_vol (Float64), sell_vol (Float64), n_trades (UInt32)
+
+        Returns a DataFrame with columns:
+            timestamp (Datetime ms UTC) — 1s bar open time, matches kline open_time
+            buy_vol   (Float64)
+            sell_vol  (Float64)
+            n_trades  (UInt32)
+
+        Raises:
+            FileNotFoundError: if the aggTrades directory does not exist.
+        """
+        aggtrades_dir = self.data_dir / "spot" / "daily" / "aggTrades" / symbol
+        if not aggtrades_dir.exists():
+            raise FileNotFoundError(
+                f"aggTrades directory not found: {aggtrades_dir}\n"
+                "Run packages/data/download-aggtrades.py first."
+            )
+
+        pattern = str(aggtrades_dir / "*.parquet")
+        df = pl.scan_parquet(pattern)
+
+        # Convert Int64 ms → Datetime for consistent filtering/joining with klines
+        df = df.with_columns(
+            pl.from_epoch("timestamp_ms", time_unit="ms").alias("timestamp")
+        )
+
+        # Date range filter (strip tz to match naive parquet timestamps)
+        if start_time is not None:
+            st = start_time.replace(tzinfo=None) if start_time.tzinfo else start_time
+            df = df.filter(pl.col("timestamp") >= st)
+        if end_time is not None:
+            et = end_time.replace(tzinfo=None) if end_time.tzinfo else end_time
+            df = df.filter(pl.col("timestamp") <= et)
+
+        return (
+            df.select(["timestamp", "buy_vol", "sell_vol", "n_trades"])
+            .sort("timestamp")
+            .collect()
+        )
+
     @staticmethod
     def resample(
         df: pl.DataFrame,
