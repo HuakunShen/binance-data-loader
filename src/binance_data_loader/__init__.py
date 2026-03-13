@@ -31,6 +31,7 @@ from binance_data_loader.metadata import BinanceDataMetadata
 from binance_data_loader.processors import (
     AggTradeProcessor,
     BaseProcessor,
+    BookDepthProcessor,
     KlineProcessor,
 )
 from binance_data_loader.types import AssetType, DataType
@@ -41,8 +42,9 @@ __all__ = [
     "DownloadSummary",
     # Processors
     "BaseProcessor",
-    "KlineProcessor",
     "AggTradeProcessor",
+    "BookDepthProcessor",
+    "KlineProcessor",
     # Loader
     "BinanceDataLoader",
     "load_kline_data",
