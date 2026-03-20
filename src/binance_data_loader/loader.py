@@ -284,6 +284,50 @@ class BinanceDataLoader:
             .collect()
         )
 
+    def load_bookdepth(
+        self,
+        symbol: str,
+        start_time: Optional[datetime] = None,
+        end_time: Optional[datetime] = None,
+        source: Optional[Literal["spot", "futures"]] = None,
+    ) -> pl.DataFrame:
+        """Load raw bookDepth snapshots.
+
+        Files are at: {data_dir}/futures/um/daily/bookDepth/{symbol}/...parquet
+        Schema: timestamp_ms, percentage, depth, notional
+
+        Spot Binance Vision does not provide the same processed bookDepth layout in
+        this repo, so this loader is currently futures-only.
+        """
+        market = source or self.data_type
+        if market != "futures":
+            raise ValueError("load_bookdepth currently supports futures data only")
+
+        depth_dir = self.data_dir / "futures" / "um" / "daily" / "bookDepth" / symbol
+        if not depth_dir.exists():
+            raise FileNotFoundError(
+                f"bookDepth directory not found: {depth_dir}\n"
+                "Run packages/data/download-binance.py first."
+            )
+
+        pattern = str(depth_dir / "*.parquet")
+        df = pl.scan_parquet(pattern).with_columns(
+            pl.from_epoch("timestamp_ms", time_unit="ms").alias("timestamp")
+        )
+
+        if start_time is not None:
+            st = start_time.replace(tzinfo=None) if start_time.tzinfo else start_time
+            df = df.filter(pl.col("timestamp") >= st)
+        if end_time is not None:
+            et = end_time.replace(tzinfo=None) if end_time.tzinfo else end_time
+            df = df.filter(pl.col("timestamp") <= et)
+
+        return (
+            df.select(["timestamp", "percentage", "depth", "notional"])
+            .sort(["timestamp", "percentage"])
+            .collect()
+        )
+
     @staticmethod
     def resample(
         df: pl.DataFrame,
