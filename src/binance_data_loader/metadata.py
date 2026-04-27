@@ -1,6 +1,7 @@
 """Fetch metadata about available Binance data files."""
 
 import re
+import time
 import requests
 import xmltodict
 import polars as pl
@@ -16,10 +17,42 @@ class BinanceDataMetadata:
 
     _BASE_URL = "https://s3-ap-northeast-1.amazonaws.com/data.binance.vision"
     _MAX_KEYS_PER_REQUEST = 1000
+    _MAX_RETRIES = 5
+    _INITIAL_BACKOFF_SECONDS = 2.0
 
     def __init__(self):
         """Initialize metadata fetcher."""
         self._files: List[Dict] = []
+
+    def _fetch_page(self, request_url: str) -> requests.Response:
+        """Fetch a single S3 listing page with retry + exponential backoff.
+
+        Raises the last RequestException if all retries fail. Truncating the
+        listing on transient errors caused silent data gaps for callers that
+        treat the returned DataFrame as authoritative.
+        """
+        last_exc: Optional[Exception] = None
+        backoff = self._INITIAL_BACKOFF_SECONDS
+        for attempt in range(1, self._MAX_RETRIES + 1):
+            try:
+                response = requests.get(request_url, timeout=30)
+                response.raise_for_status()
+                return response
+            except requests.exceptions.RequestException as e:
+                last_exc = e
+                if attempt == self._MAX_RETRIES:
+                    break
+                print(
+                    f"Warning: metadata page fetch failed "
+                    f"(attempt {attempt}/{self._MAX_RETRIES}): {e}. "
+                    f"Retrying in {backoff:.1f}s..."
+                )
+                time.sleep(backoff)
+                backoff *= 2
+        raise RuntimeError(
+            f"Failed to fetch metadata page after {self._MAX_RETRIES} attempts: "
+            f"{last_exc}"
+        ) from last_exc
 
     def fetch_file_list(
         self, prefix: str, end_date: Optional[datetime] = None
@@ -65,13 +98,7 @@ class BinanceDataMetadata:
                 if marker:
                     request_url += f"&marker={marker}"
 
-                # Make request
-                try:
-                    response = requests.get(request_url, timeout=30)
-                    response.raise_for_status()
-                except requests.exceptions.RequestException as e:
-                    print(f"Error fetching data: {e}")
-                    break
+                response = self._fetch_page(request_url)
 
                 request_count += 1
 
